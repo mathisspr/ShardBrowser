@@ -339,6 +339,28 @@ async fn create_profile(Extension(t): Extension<Ticket>, Json(body): Json<Create
     persist_created(Door("POST /profiles"), &t, None, body).await
 }
 
+/// A `shardbrowser://create` link's profile (fork): what `POST /profiles` makes
+/// from a fresh library fingerprint of this machine's platform. Returns its id.
+pub(crate) async fn create_for_link(t: &Ticket, name: String, notes: String, proxy_id: Option<String>) -> Result<String, String> {
+    let text = |e: ApiError| e.1.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error").to_string();
+    let fid = random_fingerprint_for(None).map_err(text)?;
+    let mut cfg = crate::build_fingerprint_config(crate::main_window().as_ref(), &fid)?;
+    cfg.remove("_meta");
+    let body = CreateReq {
+        name: Some(name),
+        notes: Some(notes),
+        proxy_id,
+        proxy: None,
+        folder: None,
+        color: None,
+        extensions: None,
+        refresh_rate: None,
+        fingerprint: Value::Object(cfg),
+    };
+    let Json(made) = persist_created(Door("POST /profiles"), t, None, body).await.map_err(text)?;
+    made.get("id").and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| "the new profile has no id".into())
+}
+
 async fn create_profile_in_folder(
     Extension(t): Extension<Ticket>,
     Path(folder): Path<String>,

@@ -60,4 +60,4 @@ jobs:
           cp "$setup" "staging/ShardBrowser-YT-Setup-${TAG#yt-v}.exe"
           cp src-tauri/target/x86_64-pc-windows-msvc/release/shardbrowser-launcher.exe "staging/ShardBrowser-YT-portable-${TAG#yt-v}.exe"
           (cd staging && sha256sum *.exe > SHA256SUMS)
-          gh release create "$TAG" staging/* --target youtube --title "ShardBrowser YT ${TAG#yt-v}" --notes "ShardBrowser Launcher ${TAG#yt-v} mit shardbrowser://open/<profil>-Links (Start wie über den Open-Button, ohne CDP). Stand: $(git log -1 --format='%h vom %cs')."
+          gh release create "$TAG" staging/* --target youtube --title "ShardBrowser YT ${TAG#yt-v}" --notes "ShardBrowser Launcher ${TAG#yt-v} mit shardbrowser://open/<profil>-Links (Start wie über den Open-Button, ohne CDP) und shardbrowser://create-Links (Profil samt Proxy aus dem Channel-Organizer im Team anlegen). Stand: $(git log -1 --format='%h vom %cs')."
