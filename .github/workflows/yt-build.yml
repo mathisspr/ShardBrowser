@@ -1,0 +1,67 @@
+# Builds the Windows launcher of this fork (upstream + shardbrowser:// open links)
+# and publishes it as a GitHub release. Started by yt-sync.yml or by hand.
+name: yt-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. yt-v2.1.2-1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: youtube
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui-kit/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: yt-win-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: yt-win-cargo-
+
+      - run: npm ci
+
+      - name: Test open links
+        working-directory: src-tauri
+        run: cargo test --lib open_link
+
+      - name: Build
+        run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          bundle=src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis
+          setup=$(find "$bundle" -name '*-setup.exe' -print -quit)
+          [ -n "$setup" ] || { echo "::error::no NSIS setup built"; exit 1; }
+          mkdir staging
+          cp "$setup" "staging/ShardBrowser-YT-Setup-${TAG#yt-v}.exe"
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/shardbrowser-launcher.exe "staging/ShardBrowser-YT-portable-${TAG#yt-v}.exe"
+          (cd staging && sha256sum *.exe > SHA256SUMS)
+          gh release create "$TAG" staging/* --target youtube --title "ShardBrowser YT ${TAG#yt-v}" --notes "ShardBrowser Launcher ${TAG#yt-v} mit shardbrowser://open/<profil>-Links (Start wie über den Open-Button, ohne CDP). Stand: $(git log -1 --format='%h vom %cs')."

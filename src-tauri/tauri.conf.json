@@ -43,5 +43,10 @@
         "upgradeCode": "004ac8c7-eb6d-5866-a3d7-d1cfd9d82f3d"
       }
     }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["shardbrowser"] }
+    }
   }
 }

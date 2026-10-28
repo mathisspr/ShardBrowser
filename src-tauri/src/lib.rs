@@ -23,6 +23,7 @@ mod reset;
 mod team;
 mod space;
 mod ext_updates;
+mod open_link;
 // A live end-to-end check against a real team server and engine, run by hand (macOS, Linux).
 #[cfg(all(test, unix))]
 mod live_e2e;
@@ -2578,9 +2579,13 @@ pub fn reap_if_asked() -> Option<i32> {
 pub fn run() {
     with_app_menu(tauri::Builder::default())
         // Must be the first plugin: a second launch focuses the running window.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // An open link reaches the deep-link plugin; the window stays where it is.
+            if !open_link::in_args(&argv) {
+                show_main_window(app);
+            }
         }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -2801,6 +2806,18 @@ pub fn run() {
         ])
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
+
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                #[cfg(any(windows, target_os = "linux"))]
+                if let Err(e) = app.deep_link().register_all() {
+                    eprintln!("[launcher] shardbrowser:// links not registered: {e}");
+                }
+                app.deep_link().on_open_url(|event| open_link::handle(event.urls().iter().map(|u| u.to_string()), false));
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    open_link::handle(urls.iter().map(|u| u.to_string()), true);
+                }
+            }
 
             {
                 use tauri::menu::{Menu, MenuItem};

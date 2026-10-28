@@ -1,0 +1,57 @@
+# Keeps the fork current: merges ProxyShard/ShardBrowser main into the youtube
+# branch every 6 hours and starts a build when upstream moved. A conflict opens
+# an issue instead of pushing anything.
+name: yt-sync
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: youtube
+          fetch-depth: 0
+
+      - name: Merge upstream
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "yt-sync"
+          git config user.email "yt-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/ProxyShard/ShardBrowser.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Upstream unchanged."
+            echo "changed=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort
+            gh issue create --title "yt-sync: Merge-Konflikt mit Upstream $(git rev-parse --short upstream/main)" \
+              --body "Upstream lässt sich nicht automatisch übernehmen. Der Konflikt muss von Hand im Zweig \`youtube\` gelöst werden."
+            exit 1
+          fi
+          git push origin youtube
+          echo "changed=yes" >> "$GITHUB_OUTPUT"
+
+      - name: Start build
+        if: steps.merge.outputs.changed == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          n=$(( $(gh release list --limit 200 --json tagName -q "[.[] | select(.tagName | startswith(\"yt-v$version-\"))] | length") + 1 ))
+          gh workflow run yt-build.yml --ref youtube -f tag="yt-v$version-$n"
