@@ -356,6 +356,7 @@ pub(crate) async fn create_for_link(t: &Ticket, name: String, notes: String, pro
         &json!({ "canvas": true, "webgl": true, "audio": true, "client_rects": true, "fonts": true }),
     )?;
     claim_storage_quota(&mut cfg);
+    keep_template_platform_version(&mut cfg, &fid);
     let body = CreateReq {
         name: Some(name),
         notes: Some(notes),
@@ -400,6 +401,24 @@ fn gpu_maker(s: &str) -> Option<&'static str> {
         .into_iter()
         .find(|(needle, _)| s.contains(needle))
         .map(|(_, maker)| maker)
+}
+
+/// The template's own Windows version back. A new profile draws one from a table
+/// with Windows 11 versions (13, 16, 17) that no template, all taken from real
+/// machines, reports; those have 10, 15, 19 and 20.
+fn keep_template_platform_version(cfg: &mut serde_json::Map<String, Value>, template_id: &str) {
+    let Some(version) = crate::fingerprints::get(template_id)
+        .ok()
+        .flatten()
+        .and_then(|e| e.payload["navigator"]["platform_version"].as_str().map(str::to_owned))
+    else {
+        return;
+    };
+    for block in ["navigator", "client_hints"] {
+        if let Some(obj) = cfg.get_mut(block).and_then(|v| v.as_object_mut()) {
+            obj.insert("platform_version".into(), json!(version));
+        }
+    }
 }
 
 /// What `navigator.storage.estimate()` reports as quota. The library has 10 GB in
