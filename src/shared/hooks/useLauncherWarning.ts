@@ -72,20 +72,29 @@ function showLauncherWarning(text: string) {
   warn(t("launcherWarning.title"), text);
 }
 
+/// A shardbrowser:// link's outcome (fork, open_link.rs), already in the user's words.
+type LinkNotice = { kind: "ok" | "info" | "warn" | "err"; title: string; detail?: string | null };
+function showLinkNotice({ kind, title, detail }: LinkNotice) {
+  const more = detail ?? undefined;
+  if (kind === "ok") toast.ok(title, { detail: more });
+  else if (kind === "info") toast.info(title, { detail: more });
+  else if (kind === "warn") warn(title, more);
+  else toast.fail({ title, detail: more });
+}
+
 // Warnings the backend raises during a launch (a geo probe that failed and
 // left the profile on UTC, say) and about team and synced profiles. stderr is
 // not a place a user looks, so they arrive as a toast.
 export function useLauncherWarning() {
   useEffect(() => {
     let disposed = false;
-    let un: (() => void) | undefined;
-    listen<string>("launcher-warning", (e) => showLauncherWarning(e.payload)).then((fn) => {
-      if (disposed) fn();
-      else un = fn;
-    });
+    const uns: Array<() => void> = [];
+    const keep = (fn: () => void) => { if (disposed) fn(); else uns.push(fn); };
+    listen<string>("launcher-warning", (e) => showLauncherWarning(e.payload)).then(keep);
+    listen<LinkNotice>("link-notice", (e) => showLinkNotice(e.payload)).then(keep);
     return () => {
       disposed = true;
-      un?.();
+      uns.forEach((fn) => fn());
     };
   }, []);
 }

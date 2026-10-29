@@ -59,6 +59,13 @@ pub fn handle<S: AsRef<str>>(urls: impl IntoIterator<Item = S>, cold_start: bool
     }
 }
 
+/// A link's outcome as its own toast: `kind` is ok, info, warn or err. Not a
+/// `launcher-warning`, which titles every text "A profile started with a warning".
+fn tell(kind: &str, title: &str, detail: Option<String>) {
+    eprintln!("[launcher] link: {title} {}", detail.as_deref().unwrap_or_default());
+    crate::notify_event("link-notice", serde_json::json!({ "kind": kind, "title": title, "detail": detail }));
+}
+
 async fn settle(cold_start: bool) {
     if cold_start {
         // Started by the link itself: let the space and the team link come up first.
@@ -74,20 +81,20 @@ async fn open(id: String, cold_start: bool) {
                 return;
             }
         }
-        crate::notify_warning("Dieses Profil ist bereits geöffnet.");
+        tell("info", "Dieses Profil ist bereits geöffnet.", None);
         return;
     }
     if crate::migrate::in_progress() {
-        crate::notify_warning("Profile werden gerade verschoben – bitte gleich noch einmal versuchen.");
+        tell("warn", "Profile werden gerade verschoben – bitte gleich noch einmal versuchen.", None);
         return;
     }
     let bus = match crate::bus().await {
         Ok(bus) => bus,
-        Err(e) => return crate::notify_warning(format!("Profil konnte nicht geöffnet werden: {e}")),
+        Err(e) => return tell("err", "Profil konnte nicht geöffnet werden", Some(e.to_string())),
     };
     // Same call as the UI's `launch` command: no CDP, headed.
     if let Err(e) = crate::launch::launch_profile_synced(&id, false, false, None, bus.port, &bus.token).await {
-        crate::notify_warning(format!("Profil konnte nicht geöffnet werden: {e}"));
+        tell("err", "Profil konnte nicht geöffnet werden", Some(e.to_string()));
     }
 }
 
@@ -109,8 +116,8 @@ struct ProxyParts {
 async fn create(code: String, cold_start: bool) {
     settle(cold_start).await;
     match make(&code).await {
-        Ok(name) => crate::notify_warning(format!("Profil „{name}“ im Team angelegt und mit dem Kanal verknüpft.")),
-        Err(e) => crate::notify_warning(format!("Profil konnte nicht angelegt werden: {e}")),
+        Ok(name) => tell("ok", &format!("Profil „{name}“ angelegt"), Some("Im Team gespeichert und mit dem Kanal verknüpft.".into())),
+        Err(e) => tell("err", "Profil konnte nicht angelegt werden", Some(e)),
     }
 }
 
@@ -147,8 +154,8 @@ struct Removal {
 async fn remove(code: String, cold_start: bool) {
     settle(cold_start).await;
     match unmake(&code).await {
-        Ok(name) => crate::notify_warning(format!("Profil „{name}“ in den Team-Papierkorb gelegt und vom Kanal gelöst.")),
-        Err(e) => crate::notify_warning(format!("Profil konnte nicht gelöscht werden: {e}")),
+        Ok(name) => tell("ok", &format!("Profil „{name}“ gelöscht"), Some("Es liegt 30 Tage im Team-Papierkorb und ist vom Kanal gelöst.".into())),
+        Err(e) => tell("err", "Profil konnte nicht gelöscht werden", Some(e)),
     }
 }
 
@@ -226,7 +233,7 @@ async fn add_proxy(t: &crate::space::Ticket, name: &str, p: ProxyParts) -> Resul
         entry.kind = ProxyKind::Socks5;
         if probe(&entry).await.is_err() {
             entry.kind = ProxyKind::Http;
-            crate::notify_warning(format!("Der Proxy für „{name}“ antwortet gerade nicht. Er wurde als HTTP angelegt – bitte in ShardBrowser prüfen."));
+            tell("warn", &format!("Der Proxy für „{name}“ antwortet gerade nicht"), Some("Er wurde als HTTP angelegt – bitte in ShardBrowser prüfen.".into()));
         }
     }
     let stored = upsert_dedup(crate::space::Door("proxy_save"), t, entry).await.map_err(|e| e.to_string())?;
