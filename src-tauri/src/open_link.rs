@@ -9,6 +9,10 @@
 //! hands out the one-time code; the launcher redeems it there for the profile's
 //! name and proxy (so no password travels in the link), makes proxy and profile
 //! like `POST /profiles` does, and reports the new id back to link the channel.
+//!
+//! `delete/<code>` removes a channel's profile the same way: the code names the
+//! profile, the launcher moves it to the team's trash like the UI's delete and
+//! reports back so the organizer unlinks the channel.
 
 use std::time::Duration;
 
@@ -21,6 +25,7 @@ const ORGANIZER: &str = "https://channel-organizer.youtube-automation.de";
 enum Link {
     Open(String),
     Create(String),
+    Delete(String),
 }
 
 /// Plain tokens only; anything else (paths, queries, escapes) is refused.
@@ -35,6 +40,7 @@ fn parse(url: &str) -> Option<Link> {
     token(rest, "open/", 1..=64)
         .map(Link::Open)
         .or_else(|| token(rest, "create/", 43..=43).map(Link::Create))
+        .or_else(|| token(rest, "delete/", 43..=43).map(Link::Delete))
 }
 
 /// Whether a command line carries a link (a second instance started by Windows).
@@ -48,6 +54,7 @@ pub fn handle<S: AsRef<str>>(urls: impl IntoIterator<Item = S>, cold_start: bool
         match link {
             Link::Open(id) => tauri::async_runtime::spawn(open(id, cold_start)),
             Link::Create(code) => tauri::async_runtime::spawn(create(code, cold_start)),
+            Link::Delete(code) => tauri::async_runtime::spawn(remove(code, cold_start)),
         };
     }
 }
@@ -130,6 +137,47 @@ async fn make(code: &str) -> Result<String, String> {
     Ok(p.name)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Removal {
+    profile_id: String,
+    name: String,
+}
+
+async fn remove(code: String, cold_start: bool) {
+    settle(cold_start).await;
+    match unmake(&code).await {
+        Ok(name) => crate::notify_warning(format!("Profil „{name}“ in den Team-Papierkorb gelegt und vom Kanal gelöst.")),
+        Err(e) => crate::notify_warning(format!("Profil konnte nicht gelöscht werden: {e}")),
+    }
+}
+
+async fn unmake(code: &str) -> Result<String, String> {
+    let t = team_ticket().await?;
+    let url = format!("{ORGANIZER}/api/browser/removal");
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let asked = http.get(&url).bearer_auth(code).send().await.map_err(|e| format!("Channel-Organizer nicht erreichbar ({e})"))?;
+    let r: Removal = answer(asked).await?.json().await.map_err(|e| e.to_string())?;
+    if crate::process::Tracker::shared().is_running(&r.profile_id) {
+        return Err(format!("„{}“ ist hier noch geöffnet. Bitte das Fenster schließen und erneut löschen.", r.name));
+    }
+    // One already gone from the team (deleted by hand) only needs unlinking.
+    if crate::space::profile::in_active_space(&r.profile_id) {
+        crate::space::profile::remove(crate::space::Door("DELETE /profiles/:id"), &t, &r.profile_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::notify_store_changed("profiles");
+    }
+    let told = http
+        .post(&url)
+        .bearer_auth(code)
+        .send()
+        .await
+        .map_err(|e| format!("„{}“ gelöscht, aber der Channel-Organizer ist nicht erreichbar ({e})", r.name))?;
+    answer(told).await.map_err(|e| format!("„{}“ gelöscht, aber nicht vom Kanal gelöst: {e}", r.name))?;
+    Ok(r.name)
+}
+
 /// The organizer's error text for a refused request.
 async fn answer(r: reqwest::Response) -> Result<reqwest::Response, String> {
     if r.status().is_success() {
@@ -206,6 +254,8 @@ mod tests {
         assert_eq!(parse(&format!("shardbrowser://create/{CODE}")), Some(Link::Create(CODE.into())));
         assert_eq!(parse(&format!("shardbrowser://create/{CODE}x")), None);
         assert_eq!(parse("shardbrowser://create/short"), None);
+        assert_eq!(parse(&format!("shardbrowser://delete/{CODE}")), Some(Link::Delete(CODE.into())));
+        assert_eq!(parse("shardbrowser://delete/k1i65jwh"), None);
     }
 
     #[test]

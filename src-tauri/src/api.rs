@@ -343,9 +343,19 @@ async fn create_profile(Extension(t): Extension<Ticket>, Json(body): Json<Create
 /// from a fresh library fingerprint of this machine's platform. Returns its id.
 pub(crate) async fn create_for_link(t: &Ticket, name: String, notes: String, proxy_id: Option<String>) -> Result<String, String> {
     let text = |e: ApiError| e.1.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error").to_string();
-    let fid = random_fingerprint_for(None).map_err(text)?;
+    let fid = match channel_fingerprint().await {
+        Some(id) => id,
+        None => random_fingerprint_for(None).map_err(text)?,
+    };
     let mut cfg = crate::build_fingerprint_config(crate::main_window().as_ref(), &fid)?;
     cfg.remove("_meta");
+    // Off by default upstream, which leaves every profile on this machine with one
+    // canvas, audio, WebGL, rect and font hash: the seeds alone are per profile.
+    apply_noise_overrides(
+        &mut cfg,
+        &json!({ "canvas": true, "webgl": true, "audio": true, "client_rects": true, "fonts": true }),
+    )?;
+    claim_storage_quota(&mut cfg);
     let body = CreateReq {
         name: Some(name),
         notes: Some(notes),
@@ -359,6 +369,48 @@ pub(crate) async fn create_for_link(t: &Ticket, name: String, notes: String, pro
     };
     let Json(made) = persist_created(Door("POST /profiles"), t, None, body).await.map_err(text)?;
     made.get("id").and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| "the new profile has no id".into())
+}
+
+/// A channel's template (fork): of this platform, by the maker of this machine's
+/// GPU, and one the GPU can back. The engine renders WebGL on the real card, so a
+/// profile naming another maker's contradicts its own pixels. `None` when the GPU
+/// is not known or no template fits; the caller then takes any of the platform.
+async fn channel_fingerprint() -> Option<String> {
+    let caps = crate::gpu_caps::probe(false).await.ok()?;
+    let maker = gpu_maker(&caps.vendor).or_else(|| gpu_maker(&caps.renderer))?;
+    let platform = crate::host_platform();
+    let all = crate::fingerprints::list_all().ok()?;
+    let pool: Vec<&crate::fingerprints::LibraryEntry> = all
+        .iter()
+        .filter(|e| e.platform.eq_ignore_ascii_case(&platform))
+        .filter(|e| gpu_maker(e.payload["webgl"]["vendor"].as_str().unwrap_or_default()) == Some(maker))
+        .filter(|e| crate::gpu_caps::compat(&e.payload, &caps).compatible)
+        .collect();
+    if pool.is_empty() {
+        return None;
+    }
+    let pick = u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as usize;
+    Some(pool[pick % pool.len()].id.clone())
+}
+
+/// The GPU maker a WebGL vendor or renderer string names.
+fn gpu_maker(s: &str) -> Option<&'static str> {
+    let s = s.to_ascii_lowercase();
+    [("nvidia", "nvidia"), ("amd", "amd"), ("ati ", "amd"), ("radeon", "amd"), ("intel", "intel"), ("apple", "apple")]
+        .into_iter()
+        .find(|(needle, _)| s.contains(needle))
+        .map(|(_, maker)| maker)
+}
+
+/// What `navigator.storage.estimate()` reports as quota. The library has 10 GB in
+/// every template, a size no real disk gives; Chrome grants an origin 60 % of the
+/// whole disk, so the quota of a common SSD size is taken instead.
+fn claim_storage_quota(cfg: &mut serde_json::Map<String, Value>) {
+    // 60 % of 256 GB, 500 GB, 512 GB, 1 TB, 1 TiB and 2 TB disks, in GiB.
+    const QUOTAS_GB: [u32; 6] = [143, 279, 286, 559, 572, 1118];
+    let Some(estimate) = cfg.get_mut("storage_estimate").and_then(|v| v.as_object_mut()) else { return };
+    let pick = uuid::Uuid::new_v4().as_bytes()[0] as usize;
+    estimate.insert("quota_gb".into(), json!(QUOTAS_GB[pick % QUOTAS_GB.len()]));
 }
 
 async fn create_profile_in_folder(
