@@ -339,6 +339,8 @@ struct Up {
     folder: String,
     data: String,
     card: Card,
+    /// Unix seconds, for the server's row; already in `data`, so not in the digest.
+    created_at: Option<u64>,
     hash: String,
 }
 
@@ -360,14 +362,20 @@ fn up_of(stored: &StoredProfile, tags: Vec<String>) -> Up {
     let folder = stored.meta.folder.clone();
     let card = remote::card(stored, tags);
     let hash = digest(&json!({ "name": name, "folder": folder, "data": body, "card": card }));
-    Up { name, folder, data: b64(&body), card, hash }
+    let created_at = remote::stamp_secs(stored.meta.created_at.as_deref());
+    Up { name, folder, data: b64(&body), card, created_at, hash }
 }
 
 /// This computer's own profiles, temporary ones left out. One whose file is
 /// there but unreadable is left out too: [`unreadable`] says which.
 fn local_profiles() -> Result<BTreeMap<String, StoredProfile>, Stop> {
     let rows = local::profile::list_all().map_err(|e| unread("the profiles", e))?;
-    Ok(rows.into_iter().filter_map(|m| local::profile::load_raw(&m.id).ok().map(|s| (m.id, s))).collect())
+    // A protected profile never syncs; one picked before it was locked is left alone too.
+    Ok(rows
+        .into_iter()
+        .filter(|m| !m.protected)
+        .filter_map(|m| local::profile::load_raw(&m.id).ok().map(|s| (m.id, s)))
+        .collect())
 }
 
 /// Its file is here but did not read: neither changed nor deleted.
@@ -405,6 +413,7 @@ fn me_path(kind: &str, id: &str) -> Net<String> {
 async fn put_profile(c: &TeamClient, id: &str, up: &Up, base: u64) -> Net<u64> {
     let body = json!({
         "name": up.name, "folder": up.folder, "data": up.data, "base_revision": base, "card": up.card,
+        "created_at": up.created_at,
     });
     let w: Written = c.json(Method::PUT, &me_path("profiles", id)?, Some(&body)).await?;
     Ok(w.revision)

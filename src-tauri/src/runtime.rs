@@ -33,7 +33,7 @@ const MANIFEST_URL: &str =
 const MANIFEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 const LAUNCHER_RELEASE_REPO: &str = "ProxyShard/ShardBrowser";
 /// Chromium version baked into the current bundle (used for Mac Framework path).
-pub const CHROMIUM_VERSION: &str = "156.0.8078.48";
+pub const CHROMIUM_VERSION: &str = "157.0.8103.39";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArchiveSpec {
@@ -122,6 +122,18 @@ fn engine_root_dir() -> &'static str {
 const FINGERPRINTS_ARCHIVE_KEY: &str = "ShardX-Fingerprints.zip";
 const FINGERPRINTS_TOP_DIR: &str = "shardx-fingerprints";
 
+/// An engine descriptor profiles are migrated to.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct EngineTarget {
+    chromium_version: String,
+    grease_brand: Option<String>,
+    grease_version: Option<String>,
+    tls: Option<serde_json::Value>,
+    /// What a phone profile reports instead (see `RemoteManifest`).
+    #[serde(default)]
+    android_chromium_version: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Manifest {
     browser_etag: Option<String>,
@@ -139,6 +151,9 @@ struct Manifest {
     /// current `applied_chromium_version`. No bump-the-constant ceremony.
     #[serde(default)]
     applied_signature: Option<String>,
+    /// What the profiles were last migrated to, kept for protected ones: migrated when unlocked (#127).
+    #[serde(default)]
+    applied_target: Option<EngineTarget>,
     /// Build stamp of the archive currently extracted; the fallback for
     /// archives that carry no `shardx-build` file.
     #[serde(default)]
@@ -424,6 +439,9 @@ struct RemoteManifest {
     /// Lowest launcher version this engine build can be driven by; absent means
     /// any. An older launcher gets a browser it cannot configure.
     min_launcher_version: Option<String>,
+    /// The Chrome for Android build of the same major, which phone profiles
+    /// report: Android ships its own build numbers, and a phone with a desktop one is a build no phone has.
+    android_chromium_version: Option<String>,
 }
 
 /// Fetch the version manifest (GitHub raw) — one request yielding every
@@ -461,6 +479,7 @@ async fn fetch_manifest_at(url: &str, budget: std::time::Duration) -> RemoteMani
             chromium_version: str_field("chromium_version"),
             grease_brand: str_field("grease_brand"),
             grease_version: str_field("grease_version"),
+            android_chromium_version: str_field("android_chromium_version"),
             tls: v.get("tls").filter(|t| t.is_object()).cloned(),
             // Written as a number or a string; both mean the same thing.
             engine_build: v.get("engine_build").and_then(|b| match b {
@@ -513,15 +532,8 @@ fn migrate_dir_to(
     grease_brand: Option<&str>,
     grease_version: Option<&str>,
     tls: Option<&serde_json::Value>,
+    android_version: Option<&str>,
 ) -> Result<usize> {
-    let parts: Vec<&str> = chromium_version.split('.').collect();
-    if parts.len() != 4 {
-        return Ok(0);
-    }
-    let major = parts[0];
-    let build: i64 = parts[2].parse().unwrap_or(0);
-    let patch: i64 = parts[3].parse().unwrap_or(0);
-
     let mut n = 0usize;
     for ent in fs::read_dir(dir)?.flatten() {
         let p = ent.path();
@@ -530,6 +542,41 @@ fn migrate_dir_to(
         }
         let Ok(text) = fs::read_to_string(&p) else { continue };
         let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        // A protected profile's fingerprint is sealed: it is migrated when it is unlocked.
+        if cfg.pointer("/_meta/lock").is_some() {
+            continue;
+        }
+        if migrate_value(&mut cfg, chromium_version, grease_brand, grease_version, tls, android_version) {
+            fs::write(&p, serde_json::to_string_pretty(&cfg)?)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// One profile's config brought to the engine descriptor; whether it changed.
+fn migrate_value(
+    cfg: &mut serde_json::Value,
+    chromium_version: &str,
+    grease_brand: Option<&str>,
+    grease_version: Option<&str>,
+    tls: Option<&serde_json::Value>,
+    android_version: Option<&str>,
+) -> bool {
+    let parts: Vec<&str> = chromium_version.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    let major = parts[0];
+    // A phone reports the Android build of this major, when the manifest names one.
+    let chromium_version = android_version
+        .filter(|v| v.split('.').count() == 4 && v.split('.').next() == Some(major))
+        .filter(|_| cfg.as_object().is_some_and(crate::space::profile::claims_mobile))
+        .unwrap_or(chromium_version);
+    let parts: Vec<&str> = chromium_version.split('.').collect();
+    let build: i64 = parts[2].parse().unwrap_or(0);
+    let patch: i64 = parts[3].parse().unwrap_or(0);
+    {
         let mut changed = false;
 
         // navigator.user_agent: replace the Chrome/<ver> token with major.0.0.0.
@@ -590,19 +637,14 @@ fn migrate_dir_to(
             }
         }
 
-        if add_apple_webgpu_features(&mut cfg) {
+        if add_apple_webgpu_features(cfg) {
             changed = true;
         }
-        if add_chrome_brand(&mut cfg) {
+        if add_chrome_brand(cfg) {
             changed = true;
         }
-
-        if changed {
-            fs::write(&p, serde_json::to_string_pretty(&cfg)?)?;
-            n += 1;
-        }
+        changed
     }
-    Ok(n)
 }
 
 /// The brand Chrome lists in `userAgentData.brands` and `Sec-CH-UA`, Android included.
@@ -626,27 +668,30 @@ fn add_chrome_brand(cfg: &mut serde_json::Value) -> bool {
 
 /// WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
 const APPLE_WEBGPU_ADDED: &[&str] = &["texture-compression-unaligned"];
+/// Chrome 157 adds these from M2 on (Dawn: Apple8 with Mac2, or Apple9); M1 has none.
+const APPLE_M2_WEBGPU_ADDED: &[&str] = &["atomic-vec2u-min-max"];
 
-/// Adds `APPLE_WEBGPU_ADDED` to an Apple M-series `webgpu.features`; touches nothing else.
-/// An absent or empty list means "the host's own", so it stays as it is.
+/// Adds `APPLE_WEBGPU_ADDED` (and from M2 on `APPLE_M2_WEBGPU_ADDED`) to an Apple M-series
+/// `webgpu.features`; touches nothing else. An absent or empty list means "the host's own".
 fn add_apple_webgpu_features(cfg: &mut serde_json::Value) -> bool {
-    let apple_m = cfg
+    let generation: Option<u32> = cfg
         .pointer("/webgl/renderer")
         .and_then(|v| v.as_str())
         .and_then(|r| r.find("Apple M").map(|i| &r[i + 7..]))
-        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok());
     let apple_adapter = cfg.pointer("/webgpu/vendor").and_then(|v| v.as_str()) == Some("apple");
-    if !apple_m || !apple_adapter {
+    let Some(generation) = generation.filter(|_| apple_adapter) else {
         return false;
-    }
+    };
     let Some(list) = cfg.pointer_mut("/webgpu/features").and_then(|v| v.as_array_mut()) else {
         return false;
     };
     if list.is_empty() {
         return false;
     }
+    let m2: &[&str] = if generation >= 2 { APPLE_M2_WEBGPU_ADDED } else { &[] };
     let mut changed = false;
-    for &feat in APPLE_WEBGPU_ADDED {
+    for &feat in APPLE_WEBGPU_ADDED.iter().chain(m2) {
         if list.iter().any(|v| v.as_str() == Some(feat)) {
             continue;
         }
@@ -658,6 +703,43 @@ fn add_apple_webgpu_features(cfg: &mut serde_json::Value) -> bool {
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod android_version_tests {
+    use super::migrate_value;
+    use serde_json::json;
+
+    fn phone() -> serde_json::Value {
+        json!({ "navigator": { "platform": "Android",
+                "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36" },
+            "client_hints": { "mobile": true, "brand": "Google Chrome", "brand_version": "156", "brand_full_version": "156.0.8078.48" } })
+    }
+
+    #[test]
+    fn a_phone_reports_the_android_build_and_a_desktop_the_engine_one() {
+        let mut p = phone();
+        assert!(migrate_value(&mut p, "157.0.8103.39", None, None, None, Some("157.0.8103.38")));
+        let ch = &p["client_hints"];
+        assert_eq!((ch["brand_version"].as_str(), ch["brand_full_version"].as_str()), (Some("157"), Some("157.0.8103.38")));
+        assert_eq!((ch["chrome_build"].as_i64(), ch["chrome_patch"].as_i64()), (Some(8103), Some(38)));
+        assert!(p["navigator"]["user_agent"].as_str().unwrap().contains("Chrome/157.0.0.0 Mobile"));
+        assert!(!migrate_value(&mut p, "157.0.8103.39", None, None, None, Some("157.0.8103.38")), "once");
+
+        let mut desk = json!({ "navigator": { "platform": "Win32", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/156.0.0.0 Safari/537.36" },
+            "client_hints": { "mobile": false, "brand_full_version": "156.0.8078.48" } });
+        migrate_value(&mut desk, "157.0.8103.39", None, None, None, Some("157.0.8103.38"));
+        assert_eq!(desk["client_hints"]["brand_full_version"], "157.0.8103.39");
+    }
+
+    #[test]
+    fn an_android_build_of_another_major_or_none_falls_back_to_the_engine() {
+        for android in [None, Some("156.0.8078.81"), Some("157.0.8103"), Some("")] {
+            let mut p = phone();
+            migrate_value(&mut p, "157.0.8103.39", None, None, None, android);
+            assert_eq!(p["client_hints"]["brand_full_version"], "157.0.8103.39", "{android:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -721,6 +803,16 @@ mod apple_webgpu_tests {
     }
 
     #[test]
+    fn m2_and_later_also_gain_the_157_feature_and_m1_does_not() {
+        let m3 = "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)";
+        let mut cfg = mac(m3, "apple", json!(["shader-f16", "texture-compression-unaligned"]));
+        assert!(add_apple_webgpu_features(&mut cfg));
+        assert_eq!(cfg["webgpu"]["features"], json!(["atomic-vec2u-min-max", "shader-f16", "texture-compression-unaligned"]));
+        let mut m1 = mac(M1, "apple", json!(["shader-f16", "texture-compression-unaligned"]));
+        assert!(!add_apple_webgpu_features(&mut m1), "M1 has no atomic-vec2u-min-max");
+    }
+
+    #[test]
     fn other_gpus_and_host_lists_are_left_alone() {
         let feats = json!(["shader-f16", "texture-compression-bc"]);
         let intel_mac = mac("ANGLE (Intel, ANGLE Metal Renderer: Intel(R) UHD Graphics 630, Unspecified Version)", "intel", feats.clone());
@@ -744,10 +836,10 @@ mod apple_webgpu_tests {
         let file = dir.join("p.json");
         std::fs::write(&file, mac(M1, "apple", json!(["texture-compression-etc2", "timestamp-query"])).to_string()).unwrap();
 
-        assert_eq!(migrate_dir_to(&dir, "156.0.8078.48", None, None, None).unwrap(), 1);
+        assert_eq!(migrate_dir_to(&dir, "156.0.8078.48", None, None, None, None).unwrap(), 1);
         let got: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(got["webgpu"]["features"], json!(["texture-compression-etc2", "texture-compression-unaligned", "timestamp-query"]));
-        assert_eq!(migrate_dir_to(&dir, "156.0.8078.48", None, None, None).unwrap(), 0, "a second run must write nothing");
+        assert_eq!(migrate_dir_to(&dir, "156.0.8078.48", None, None, None, None).unwrap(), 0, "a second run must write nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -758,14 +850,7 @@ mod apple_webgpu_tests {
 /// fingerprint the operator brought in themselves has no library entry under
 /// that name and is left exactly as it is.
 fn adopt_library_fields(dir: &Path) -> Result<usize> {
-    let mut lib: std::collections::HashMap<String, serde_json::Value> =
-        std::collections::HashMap::new();
-    for e in crate::fingerprints::list_all().unwrap_or_default() {
-        // By library id first: it survives the operator renaming the profile,
-        // which the name does not.
-        lib.insert(e.id, e.payload.clone());
-        lib.entry(e.label).or_insert(e.payload);
-    }
+    let lib = library_by_key();
     if lib.is_empty() {
         return Ok(0);
     }
@@ -777,13 +862,40 @@ fn adopt_library_fields(dir: &Path) -> Result<usize> {
         }
         let Ok(text) = fs::read_to_string(&p) else { continue };
         let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        // Sealed: matched by its name alone it would gain readable keys; done when it is unlocked.
+        if cfg.pointer("/_meta/lock").is_some() {
+            continue;
+        }
+        if adopt_value(&mut cfg, &lib) {
+            if fs::write(&p, serde_json::to_string_pretty(&cfg).unwrap_or(text)).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+fn library_by_key() -> std::collections::HashMap<String, serde_json::Value> {
+    let mut lib = std::collections::HashMap::new();
+    for e in crate::fingerprints::list_all().unwrap_or_default() {
+        // By library id first: it survives the operator renaming the profile,
+        // which the name does not.
+        lib.insert(e.id, e.payload.clone());
+        lib.entry(e.label).or_insert(e.payload);
+    }
+    lib
+}
+
+/// The library's newer keys put into one profile's config; whether it changed.
+fn adopt_value(cfg: &mut serde_json::Value, lib: &std::collections::HashMap<String, serde_json::Value>) -> bool {
+    {
         let key = cfg
             .pointer("/_meta/gpu_preset_id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .or_else(|| cfg.get("name").and_then(|v| v.as_str()))
             .map(String::from);
-        let Some(src) = key.as_deref().and_then(|k| lib.get(k)) else { continue };
+        let Some(src) = key.as_deref().and_then(|k| lib.get(k)) else { return false };
         let mut changed = false;
         for key in ["fonts", "fonts_local"] {
             if cfg.get(key).is_none() {
@@ -803,13 +915,26 @@ fn adopt_library_fields(dir: &Path) -> Result<usize> {
                 }
             }
         }
-        if changed {
-            if fs::write(&p, serde_json::to_string_pretty(&cfg).unwrap_or(text)).is_ok() {
-                n += 1;
+        // Subgroup sizes the adapter reports: the template's win for the same claimed GPU,
+        // over a stored null or a pre-157 capture (D3D12 max was 128 then); never a null.
+        let same_gpu = ["/webgpu/vendor", "/webgpu/architecture"]
+            .iter()
+            .all(|k| cfg.pointer(k).is_some() && cfg.pointer(k) == src.pointer(k));
+        for key in ["subgroupMinSize", "subgroupMaxSize"] {
+            let path = format!("/webgpu/{key}");
+            let take = src.pointer(&path).filter(|v| v.is_u64()).cloned();
+            if let (true, Some(v)) = (same_gpu, take) {
+                if cfg.pointer(&path) == Some(&v) {
+                    continue;
+                }
+                if let Some(w) = cfg.get_mut("webgpu").and_then(|v| v.as_object_mut()) {
+                    w.insert(key.into(), v);
+                    changed = true;
+                }
             }
         }
+        changed
     }
-    Ok(n)
 }
 
 #[cfg(test)]
@@ -840,6 +965,32 @@ mod adopt_tests {
     }
 
     #[test]
+    fn adopt_takes_subgroup_sizes_only_for_the_same_gpu() {
+        let mut lib = std::collections::HashMap::new();
+        lib.insert("win-rtx3060".to_string(), json!({"webgpu": {"vendor": "nvidia", "architecture": "ampere",
+            "features": ["shader-f16"], "subgroupMinSize": 32, "subgroupMaxSize": 32}}));
+        lib.insert("android-x".to_string(), json!({"webgpu": {"vendor": "arm", "architecture": "valhall",
+            "features": ["shader-f16"], "subgroupMinSize": null, "subgroupMaxSize": null}}));
+        let mut same = json!({"name": "win-rtx3060", "webgpu": {"vendor": "nvidia", "architecture": "ampere", "features": ["shader-f16"]}});
+        assert!(super::adopt_value(&mut same, &lib));
+        assert_eq!((same["webgpu"]["subgroupMinSize"].clone(), same["webgpu"]["subgroupMaxSize"].clone()), (json!(32), json!(32)));
+        assert!(!super::adopt_value(&mut same, &lib), "once");
+        // A pre-157 capture (D3D12 max 128) and a stored null both give way to the template.
+        let mut stale = json!({"name": "win-rtx3060", "webgpu": {"vendor": "nvidia", "architecture": "ampere",
+            "features": ["shader-f16"], "subgroupMinSize": 32, "subgroupMaxSize": 128}});
+        assert!(super::adopt_value(&mut stale, &lib));
+        assert_eq!(stale["webgpu"]["subgroupMaxSize"], json!(32));
+        let mut stored_null = json!({"name": "win-rtx3060", "webgpu": {"vendor": "nvidia", "architecture": "ampere",
+            "features": ["shader-f16"], "subgroupMinSize": null, "subgroupMaxSize": null}});
+        assert!(super::adopt_value(&mut stored_null, &lib));
+        assert_eq!(stored_null["webgpu"]["subgroupMinSize"], json!(32));
+        let mut changed_gpu = json!({"name": "win-rtx3060", "webgpu": {"vendor": "amd", "architecture": "rdna-2", "features": ["shader-f16"]}});
+        assert!(!super::adopt_value(&mut changed_gpu, &lib));
+        let mut null_src = json!({"name": "android-x", "webgpu": {"vendor": "arm", "architecture": "valhall", "features": ["shader-f16"]}});
+        assert!(!super::adopt_value(&mut null_src, &lib));
+    }
+
+    #[test]
     fn adopt_leaves_a_profile_with_no_library_entry_alone() {
         let lib = std::collections::HashMap::new();
         let own = json!({"name": "my own capture", "_meta": {"gpu_preset_id": ""}});
@@ -856,31 +1007,53 @@ fn migrate_all_to(
     grease_brand: Option<&str>,
     grease_version: Option<&str>,
     tls: Option<&serde_json::Value>,
+    android_version: Option<&str>,
 ) -> usize {
     let mut n = 0;
     if let Ok(d) = crate::store::profiles_dir() {
-        n += migrate_dir_to(&d, chromium_version, grease_brand, grease_version, tls).unwrap_or(0);
+        n += migrate_dir_to(&d, chromium_version, grease_brand, grease_version, tls, android_version).unwrap_or(0);
         n += adopt_library_fields(&d).unwrap_or(0);
     }
     if let Ok(d) = crate::store::fingerprints_dir() {
-        n += migrate_dir_to(&d, chromium_version, grease_brand, grease_version, tls).unwrap_or(0);
+        n += migrate_dir_to(&d, chromium_version, grease_brand, grease_version, tls, android_version).unwrap_or(0);
     }
     n
 }
 
+/// A protected profile's config, unlocked for a start, brought to the engine its file could not be
+/// migrated to while sealed. Whether it changed; the caller seals it again.
+pub fn migrate_unlocked(cfg: &mut serde_json::Value) -> bool {
+    let Some(t) = load_manifest().applied_target else { return false };
+    let moved = migrate_value(
+        cfg,
+        &t.chromium_version,
+        t.grease_brand.as_deref(),
+        t.grease_version.as_deref(),
+        t.tls.as_ref(),
+        t.android_chromium_version.as_deref(),
+    );
+    let adopted = adopt_value(cfg, &library_by_key());
+    moved || adopted
+}
+
 /// Raised when `migrate_dir_to` learns a new fix, so a launcher update reruns it once
 /// even on a manifest it has already applied.
-const MIGRATION_REV: u32 = 3;
+const MIGRATION_REV: u32 = 4;
 
 /// What a migration was applied for; the install path and the start share it.
 fn migration_signature(target: &str, m: &RemoteManifest) -> String {
-    format!(
+    let mut sig = format!(
         "{target}|{}|{}|{}|{}|m{MIGRATION_REV}",
         m.grease_brand.as_deref().unwrap_or(""),
         m.grease_version.as_deref().unwrap_or(""),
         m.tls.as_ref().map(|t| t.to_string()).unwrap_or_default(),
         m.engine_build.as_deref().unwrap_or(""),
-    )
+    );
+    // Appended only when set, so a manifest without it keeps the signature it had.
+    if let Some(a) = m.android_chromium_version.as_deref() {
+        sig.push_str(&format!("|a{a}"));
+    }
+    sig
 }
 
 /// Startup hook: migrate saved profiles + the fingerprint library (bundled +
@@ -913,10 +1086,18 @@ pub async fn ensure_profiles_migrated() {
         m.grease_brand.as_deref(),
         m.grease_version.as_deref(),
         m.tls.as_ref(),
+        m.android_chromium_version.as_deref(),
     );
     if n > 0 {
         eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
     }
+    local.applied_target = Some(EngineTarget {
+        chromium_version: target.clone(),
+        grease_brand: m.grease_brand.clone(),
+        grease_version: m.grease_version.clone(),
+        tls: m.tls.clone(),
+        android_chromium_version: m.android_chromium_version.clone(),
+    });
     local.applied_chromium_version = Some(target);
     local.applied_signature = Some(sig);
     let _ = save_manifest(&local);
@@ -1142,6 +1323,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
             manifest.grease_brand.as_deref(),
             manifest.grease_version.as_deref(),
             manifest.tls.as_ref(),
+            manifest.android_chromium_version.as_deref(),
         );
         if n > 0 {
             eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
@@ -1154,6 +1336,13 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         fingerprints_etag: fp_etag,
         applied_chromium_version: Some(target_ver.clone()),
         applied_signature: Some(sig),
+        applied_target: Some(EngineTarget {
+            chromium_version: target_ver.clone(),
+            grease_brand: manifest.grease_brand.clone(),
+            grease_version: manifest.grease_version.clone(),
+            tls: manifest.tls.clone(),
+            android_chromium_version: manifest.android_chromium_version.clone(),
+        }),
         // Recorded at the swap, never re-read off disk (a leftover
         // `<old>.manifest` once kept the version "stuck"); an engine from
         // before the record adopts the manifest's.

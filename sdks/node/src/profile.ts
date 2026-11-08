@@ -157,6 +157,10 @@ export class FingerprintLibrary {
  * advertises the new ones, and the JA4 hash no longer matches the Chrome
  * version the profile claims: 152 added the ML-DSA schemes 0x0904-0x0906, so a
  * 149-era profile is eleven entries short and reads as a mismatch.
+ *
+ * `androidVersion` is the Chrome for Android build of the same major, passed
+ * for phone profiles: Android ships its own build numbers, and a phone
+ * reporting a desktop one claims a build no phone has.
  */
 export function applyEngineVersion(
   config: Record<string, unknown>,
@@ -164,10 +168,15 @@ export function applyEngineVersion(
   greaseBrand?: string,
   greaseVersion?: string,
   tls?: Record<string, unknown>,
+  androidVersion?: string,
 ): void {
-  const parts = chromiumVersion.split(".");
+  let parts = chromiumVersion.split(".");
   if (parts.length !== 4) return;
   const major = parts[0];
+  if (androidVersion && androidVersion.split(".").length === 4 && androidVersion.split(".")[0] === major) {
+    chromiumVersion = androidVersion;
+    parts = chromiumVersion.split(".");
+  }
   const build = parseInt(parts[2], 10);
   const patch = parseInt(parts[3], 10);
 
@@ -218,8 +227,41 @@ export function applyChromeBrand(config: Record<string, unknown>): void {
   ch["brand"] = CHROME_BRAND;
 }
 
+/**
+ * Copy into a saved profile what its library template gained after it was
+ * frozen: fonts, fonts_local and webgpu.features where the profile has none,
+ * and the adapter's subgroup sizes for the same claimed GPU (the template's win). The template is
+ * found by `_meta.gpu_preset_id`, else by `name`; a profile with no template
+ * is left as it is. Mutates `config` in place. SDK equivalent of the
+ * launcher's `adopt_value`.
+ */
+export function adoptLibraryFields(config: Record<string, unknown>, fingerprintsDir: string): void {
+  const meta = config["_meta"] as Record<string, unknown> | undefined;
+  const key = [meta?.["gpu_preset_id"], config["name"]].find((k) => typeof k === "string" && k !== "") as string | undefined;
+  if (!key || !/^[A-Za-z0-9._-]+$/.test(key)) return;
+  const path = join(fingerprintsDir, `${key}.json`);
+  if (!existsSync(path)) return;
+  let src: Record<string, unknown>;
+  try { src = JSON.parse(readFileSync(path, "utf8")); } catch { return; }
+  for (const k of ["fonts", "fonts_local"]) {
+    if (config[k] === undefined && src[k] !== undefined) config[k] = src[k];
+  }
+  const w = config["webgpu"] as Record<string, unknown> | undefined;
+  const sw = src["webgpu"] as Record<string, unknown> | undefined;
+  if (!w || typeof w !== "object" || !sw || typeof sw !== "object") return;
+  if (w["features"] === undefined && sw["features"] !== undefined) w["features"] = sw["features"];
+  // The template's subgroup sizes win for the same claimed GPU, over a stored null or a
+  // pre-157 capture (D3D12 max was 128 then); a null in the template changes nothing.
+  const sameGpu = ["vendor", "architecture"].every((k) => w[k] !== undefined && w[k] === sw[k]);
+  for (const k of ["subgroupMinSize", "subgroupMaxSize"]) {
+    if (sameGpu && Number.isInteger(sw[k])) w[k] = sw[k];
+  }
+}
+
 /** WebGPU features Chrome 156 reports on Apple M-series that older templates lack. */
 const APPLE_WEBGPU_ADDED = ["texture-compression-unaligned"];
+/** Chrome 157 adds these from M2 on (Dawn: Apple8 with Mac2, or Apple9); M1 has none. */
+const APPLE_M2_WEBGPU_ADDED = ["atomic-vec2u-min-max"];
 
 /**
  * Add `APPLE_WEBGPU_ADDED` to an Apple M-series profile's `webgpu.features`, in
@@ -231,11 +273,12 @@ export function applyAppleWebGpuFeatures(config: Record<string, unknown>): void 
   const renderer = (config["webgl"] as Record<string, unknown> | undefined)?.["renderer"];
   const webgpu = config["webgpu"] as Record<string, unknown> | undefined;
   if (typeof renderer !== "string" || webgpu?.["vendor"] !== "apple") return;
-  const at = renderer.indexOf("Apple M");
-  if (at < 0 || !/[0-9]/.test(renderer.charAt(at + 7))) return;
+  const gen = /Apple M(\d+)/.exec(renderer);
+  if (!gen) return;
   const list = webgpu["features"];
   if (!Array.isArray(list) || list.length === 0) return;
-  for (const feat of APPLE_WEBGPU_ADDED) {
+  const m2 = Number(gen[1]) >= 2 ? APPLE_M2_WEBGPU_ADDED : [];
+  for (const feat of [...APPLE_WEBGPU_ADDED, ...m2]) {
     if (list.includes(feat)) continue;
     const i = list.findIndex((v) => typeof v === "string" && v > feat);
     list.splice(i < 0 ? list.length : i, 0, feat);

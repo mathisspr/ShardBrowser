@@ -8,7 +8,9 @@ export type UiLanguage = "system" | "profile";
 export type ProfileMeta = {
   id: string;
   name: string;
-  notes: string;
+  /** Null while a password locks it (`protected`). */
+  notes: string | null;
+  /** Null for no proxy, and while a password locks it: unknown then. */
   proxy_id: string | null;
   last_launched_at: string | null;
   created_at: string | null;
@@ -39,6 +41,9 @@ export type ProfileMeta = {
   open_on?: OpenOn;
   /** A team row's tag ids, from its card; personal rows take theirs from tag_list. */
   tags?: string[];
+  /** Sealed by its own password (#127): notes and proxy are null, `mobile` false and
+   *  `extensions` empty until it is unlocked. Absent from builds before it. */
+  protected?: boolean;
 };
 
 /** What this member may do with one team profile (perm.rs `Rights`). */
@@ -81,6 +86,9 @@ export type ProfileForm = {
   /// `document.hasFocus()` stays true. Stored as `window.keep_focus`; off by
   /// default, because a window that never loses focus is unusual in itself.
   keep_focus: boolean;
+  /// Present the window as maximized within the profile's screen (#140).
+  /// Stored as `window.maximized`; off by default.
+  maximized: boolean;
   /// Cookies file picked in the editor, imported once the profile exists.
   /// Editor state, not part of the fingerprint — `toStored` does not write it.
   cookies_file: string;
