@@ -1,12 +1,16 @@
 # Keeps the fork current: merges ProxyShard/ShardBrowser main into the youtube
 # branch every 6 hours and starts a build when upstream moved. A conflict opens
-# an issue instead of pushing anything.
+# an issue instead of pushing anything. Fork workflows stay under our control.
 name: yt-sync
 
 on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: yt-sync
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -37,12 +41,16 @@ jobs:
             echo "changed=no" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! git merge --no-edit upstream/main; then
+          if ! git merge --no-commit --no-ff upstream/main; then
             git merge --abort
             gh issue create --title "yt-sync: Merge-Konflikt mit Upstream $(git rev-parse --short upstream/main)" \
               --body "Upstream lässt sich nicht automatisch übernehmen. Der Konflikt muss von Hand im Zweig \`youtube\` gelöst werden."
             exit 1
           fi
+          # GITHUB_TOKEN cannot update workflow files. Keep the fork's workflows
+          # while retaining the upstream merge history for the next sync.
+          git restore --source=HEAD --staged --worktree -- .github/workflows
+          git commit --no-edit
           git push origin youtube
           echo "changed=yes" >> "$GITHUB_OUTPUT"
 
