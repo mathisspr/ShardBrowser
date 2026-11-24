@@ -10,7 +10,7 @@
 
 <p align="center">
   <strong>A free, open-source anti-detect browser launcher for web scraping and multi-accounting.</strong><br>
-  Patched Chromium 157 with engine-level fingerprint spoofing, a local API, an MCP server and SDKs.
+  Patched Chromium 158 with engine-level fingerprint spoofing, a local API, an MCP server and SDKs.
 </p>
 
 <p align="center">
@@ -40,13 +40,14 @@
   <a href="#usage">Usage</a>
 </p>
 
-ShardBrowser is built by the **[ShardX](https://shardx.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)** team (formerly ProxyShard).
-ProxyShard provides full **SOCKS5 UDP relay** support (RFC 1928 §7) and
+ShardBrowser is a free, open-source project. It works with any HTTP/SOCKS5 proxy. Disclosure: the maintainers also work as contractors for ShardX, a proxy provider. ShardX does not own or fund this project.
+
+ShardX provides full **SOCKS5 UDP relay** support (RFC 1928 §7) and
 active **p0f TCP fingerprint spoofing** at the proxy exit. This keeps the
 operating system presented by the proxy consistent with the SYN/ACK shape
 seen by websites. ShardBrowser is the anti-detect browser stack built to use
 those capabilities. The launcher manages profiles, binds proxies and
-ships a patched **Chromium 157** build that applies fingerprint changes
+ships a patched **Chromium 158** build that applies fingerprint changes
 inside the browser engine.
 
 <p align="center">
@@ -117,7 +118,7 @@ profile, persistent cookies, Widevine pre-warming and QUIC over the
 proxy UDP relay. WebRTC traffic follows the configured proxy policy and
 does not expose the host IP.
 
-ShardBrowser is free to use. ProxyShard proxies support end-to-end QUIC and
+ShardBrowser is free to use. ShardX proxies support end-to-end QUIC and
 WebRTC over SOCKS5 UDP relay. Other proxy providers can also be used,
 but full QUIC and WebRTC operation requires SOCKS5 UDP relay support.
 
@@ -158,7 +159,7 @@ iframes, web workers, developer tools and headless mode.
   exit IP. Host GPS and Wi-Fi data are never used.
 * **Network capability:** connection type, downlink, RTT, save-data,
   storage quota, JS heap limit, battery state, media-device counts.
-* **TLS ClientHello:** Chrome 156 cipher suites and signature algorithms
+* **TLS ClientHello:** Chrome 158 cipher suites and signature algorithms
   with extension shuffling. JA4, Akamai and Peetprint
   fingerprints match the browser version.
 * **HTTP-3 over the proxy's UDP relay:** QUIC works end to end through
@@ -366,7 +367,7 @@ the browser engine.
 | Client Hints (Sec-CH-UA-* full stack with GREASE)             | ✅ full                       | ❌ partial / inconsistent     | ✅ full on Multilogin / AdsPower, ❌ Dolphin     |
 | Font enumeration pinned per profile                           | ✅ system-level               | ❌ JS-only, host fonts still leak via CSS / canvas font-render | ⚠️ partial          |
 | V8 / CDP side-channel hardening (preview-getters, inspector)  | ✅ closed                     | ❌ open, CDP automation detectable | ⚠️ partial                                |
-| TLS ClientHello fingerprint (JA4)                             | ✅ matches real Chrome 156    | ⚠️ static, may drift after browser updates | ✅ matches the forked Chrome version            |
+| TLS ClientHello fingerprint (JA4)                             | ✅ matches real Chrome 158    | ⚠️ static, may drift after browser updates | ✅ matches the forked Chrome version            |
 | QUIC / HTTP-3 over SOCKS5                                     | ✅ stable end to end via UDP relay | ⚠️ unstable, falls back to TCP or drops mid-session | ❌ disabled when proxy is set |
 | WebRTC over SOCKS5 (no real-IP leak via STUN)                 | ✅ proxy UDP relay or synth candidates | ⚠️ same UDP relay path, same instability | ⚠️ disable-only            |
 | Consistency of generated profiles                             | ✅ coherent device (GPU, CPU, RAM, UA and fonts) | ❌ frequent contradictions (Win UA + Mac GPU, mobile UA + desktop screen, etc.) | ⚠️ varies |
@@ -600,6 +601,9 @@ shorthand also sets the strength used by the UI because an enabled vector
 with zero strength has no effect. A `seed` of `0`, or an omitted seed,
 still derives a stable value from the profile ID. This prevents temporary
 profiles created a second apart from sharing a fingerprint.
+
+Leave `client_rects` (DOMRect) off: noised DOM sizes are values no real
+Chrome reports, and sites detect them.
 
 #### Human input over CDP
 
@@ -922,7 +926,7 @@ React UI and Rust source, is available under the **MIT License**. See
 [LICENSE](LICENSE). You may use, fork, modify and distribute the launcher,
 including for commercial projects.
 
-The **browser engine** (the patched Chromium 157 binary that the
+The **browser engine** (the patched Chromium 158 binary that the
 launcher downloads from our CDN on first run) is distributed as a
 **closed-source binary**. Its source is not published in this
 repository or elsewhere, and the following are explicitly **not
